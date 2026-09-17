@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 import urllib.request
+import urllib.error
+from urllib.parse import urlparse
 from pathlib import Path
 
 
@@ -25,7 +28,16 @@ class OllamaClient:
         model: str = "llama3.2:3b",
         base_url: str = "http://127.0.0.1:11434",
         system_prompt: str = "You are a concise, helpful voice assistant.",
+        timeout: float = 120,
     ) -> None:
+        parsed = urlparse(base_url)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment):
+            raise ValueError("Ollama URL must be HTTP(S), without credentials, query, or fragment")
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        self.timeout = timeout
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.system_prompt = system_prompt
@@ -44,36 +56,49 @@ class OllamaClient:
             headers={"Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                payload = json.loads(response.read())
-        except Exception as exc:
-            raise RuntimeError(f"Could not reach Ollama at {self.base_url}: {exc}") from exc
-        answer = str(payload.get("response", "")).strip()
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                raw = response.read(1_048_577)
+                if len(raw) > 1_048_576:
+                    raise RuntimeError("Ollama response exceeds 1 MB")
+                payload = json.loads(raw)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise RuntimeError("Could not reach Ollama; check the service and timeout") from exc
+        except (ValueError, UnicodeError) as exc:
+            raise RuntimeError("Ollama returned invalid JSON") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("response"), str):
+            raise RuntimeError("Ollama response must contain a text response field")
+        answer = payload["response"].strip()
         if not answer:
             raise RuntimeError("Ollama returned an empty response")
         return answer
 
 
 class PiperSynthesizer:
-    def __init__(self, model_path: Path, executable: str = "piper") -> None:
-        if not model_path.exists():
+    def __init__(self, model_path: Path, executable: str = "piper", timeout: float = 120) -> None:
+        if not model_path.is_file():
             raise FileNotFoundError(f"Piper model not found: {model_path}")
         self.model_path = model_path
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        self.timeout = timeout
         self.executable = executable
 
     def synthesize(self, text: str, output_path: Path) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        command = [
-            self.executable,
-            "--model", str(self.model_path),
-            "--output_file", str(output_path),
-        ]
-        try:
-            subprocess.run(command, input=text.encode(), check=True, capture_output=True)
-        except FileNotFoundError as exc:
-            raise RuntimeError("Piper executable was not found on PATH") from exc
-        except subprocess.CalledProcessError as exc:
-            error = exc.stderr.decode(errors="replace").strip()
-            raise RuntimeError(f"Piper failed: {error}") from exc
+        # Stage a fresh result; a failed run must not accept or overwrite an old WAV.
+        with tempfile.TemporaryDirectory(dir=output_path.parent) as directory:
+            staged = Path(directory) / "response.wav"
+            command = [self.executable, "--model", str(self.model_path), "--output_file", str(staged)]
+            try:
+                subprocess.run(command, input=text.encode(), check=True,
+                               capture_output=True, timeout=self.timeout)
+            except FileNotFoundError as exc:
+                raise RuntimeError("Piper executable was not found on PATH") from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("Piper synthesis timed out") from exc
+            except subprocess.CalledProcessError as exc:
+                raise RuntimeError("Piper synthesis failed; check the voice model and executable") from exc
+            if not staged.is_file() or staged.stat().st_size == 0:
+                raise RuntimeError("Piper did not produce a nonempty audio file")
+            staged.replace(output_path)
         return output_path
-
