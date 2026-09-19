@@ -43,3 +43,17 @@ docker build -t local-voice-ai .
 ```
 
 MIT licensed.
+
+## Adapter reliability and measured scope
+
+Ollama calls use a configurable timeout, a 1 MB response budget, JSON/type validation, and
+nonempty text checks. Piper calls have a configurable timeout and require a nonempty output file.
+The pipeline refuses to overwrite the input audio. Offline tests fake the transport and subprocess
+boundaries to exercise malformed responses, download budgets, timeouts, missing output, and stage
+ordering. Passing these tests demonstrates orchestration behavior, not speech recognition quality,
+audio quality, model accuracy, real-time performance, or GPU throughput.
+
+The default Ollama endpoint is loopback. A custom `--ollama-url` can send prompts to another host,
+so the local-privacy statement applies only when that service runs locally. Live operation still
+requires separately installed Whisper weights, Ollama, and Piper voices. CI does not download or
+execute those models. Authentication and concurrency controls are not provided by this CLI.

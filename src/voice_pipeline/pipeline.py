@@ -36,8 +36,10 @@ class LocalVoicePipeline:
         self.synthesizer = synthesizer
 
     def run(self, input_path: Path, output_path: Path) -> PipelineResult:
-        if not input_path.exists():
+        if not input_path.is_file():
             raise FileNotFoundError(f"Audio input not found: {input_path}")
+        if input_path.resolve() == output_path.resolve():
+            raise ValueError("Output path must not overwrite the input audio")
         started = time.perf_counter()
         transcript = self.transcriber.transcribe(input_path).strip()
         if not transcript:
